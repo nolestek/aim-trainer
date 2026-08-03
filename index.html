@@ -120,11 +120,11 @@
   <h1>Aim Trainer</h1>
   <p class="sub">Passthrough alignment drill for Quest 3</p>
   <ol>
-    <li><strong>Clear ~4m of floor space.</strong> Passthrough stays on — you'll see your real room.</li>
-    <li><strong>Right controller trigger</strong>: place the <span style="color:var(--ink)">ball</span> at your feet, then place the <span style="color:var(--green)">target ring</span> across the room.</li>
-    <li>Take your normal golf stance over the ball. <strong>Hold trigger and drag</strong> on the floor to lay your alignment stick where you <em>think</em> the target line runs. Release to lock it.</li>
-    <li>The app shows your aim error in degrees and reveals the true line.</li>
-    <li><strong>Squeeze grip</strong>: new attempt (same ball &amp; target). <strong>Hold grip 1.5s</strong>: full reset.</li>
+    <li>Clear ~4m of floor. Passthrough stays on — you'll see your real room.</li>
+    <li><strong>Trigger</strong> drops the <span style="color:var(--ink)">ball</span> at your feet, then sets the <span style="color:var(--green)">target</span> across the room.</li>
+    <li>Over the ball, <strong>hold trigger and drag</strong> a line the way you think you're aimed. Release to lock.</li>
+    <li>You get your aim error in degrees, plus your average bias across all attempts.</li>
+    <li><strong>Grip</strong> = new attempt · <strong>hold grip 1.5s</strong> = full reset.</li>
   </ol>
   <button id="enterBtn" disabled>Checking headset…</button>
   <div id="supportMsg"></div>
@@ -184,6 +184,88 @@ document.body.appendChild(renderer.domElement);
 renderer.domElement.style.display = 'none'; // hidden until XR starts
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 2.2));
+
+// ---------------------------------------------------------------
+// In-scene HUD (head-locked panel — works without dom-overlay)
+// ---------------------------------------------------------------
+const hudRig = new THREE.Group();
+scene.add(hudRig);
+
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 1024; hudCanvas.height = 512;
+const hctx = hudCanvas.getContext('2d');
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+hudTex.colorSpace = THREE.SRGBColorSpace;
+hudTex.anisotropy = 4;
+
+const hudPanel = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.42, 0.21),
+  new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false })
+);
+hudPanel.position.set(0, -0.16, -0.6); // lower-center, 0.6m in front of the eyes
+hudPanel.renderOrder = 999;            // always drawn over the 3D objects
+hudRig.add(hudPanel);
+
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+function wrapLines(c, text, maxWidth, font) {
+  c.font = font;
+  const lines = [];
+  for (const para of text.split('\n')) {
+    let line = '';
+    for (const word of para.split(' ')) {
+      const test = line ? line + ' ' + word : word;
+      if (c.measureText(test).width > maxWidth && line) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = test;
+      }
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+function drawHUD(title, score, color, stats) {
+  const W = 1024, H = 512, c = hctx;
+  c.clearRect(0, 0, W, H);
+  c.fillStyle = 'rgba(13, 24, 17, 0.88)';
+  roundRect(c, 10, 10, W - 20, H - 20, 30); c.fill();
+  c.strokeStyle = 'rgba(125, 223, 143, 0.55)'; c.lineWidth = 4; c.stroke();
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+
+  if (!score) {
+    // Instruction-only: center the wrapped block.
+    const font = '600 50px Georgia, serif';
+    const lines = wrapLines(c, title, 900, font);
+    c.font = font; c.fillStyle = '#e8f2ea';
+    const lh = 68, startY = H / 2 - (lines.length - 1) * lh / 2;
+    lines.forEach((ln, i) => c.fillText(ln, W / 2, startY + i * lh));
+  } else {
+    const tFont = '600 40px Georgia, serif';
+    const tLines = wrapLines(c, title, 920, tFont);
+    c.font = tFont; c.fillStyle = '#e8f2ea';
+    tLines.forEach((ln, i) => c.fillText(ln, W / 2, 78 + i * 50));
+    c.font = '700 96px Georgia, serif'; c.fillStyle = color;
+    c.fillText(score, W / 2, 300);
+    if (stats) {
+      const sFont = '400 34px Georgia, serif';
+      const sLines = wrapLines(c, stats, 940, sFont);
+      c.font = sFont; c.fillStyle = '#8aa593';
+      sLines.forEach((ln, i) => c.fillText(ln, W / 2, 400 + i * 42));
+    }
+  }
+  hudTex.needsUpdate = true;
+}
 
 // ---- Ball (real golf-ball scale) ----
 const ball = new THREE.Mesh(
@@ -290,7 +372,7 @@ function onSelectStart(controller) {
     updateHUD();
   } else if (phase === PHASE.PLACE_TARGET) {
     if (hit.distanceTo(ballPos) < 1.0) {
-      phaseText.textContent = 'Too close — aim at least 1m past the ball, then pull the trigger.';
+      drawHUD('Too close — aim at least 1m past the ball, then pull the trigger.', '', '', '');
       return;
     }
     targetPos = hit.clone();
@@ -312,7 +394,7 @@ function onSelectEnd(controller) {
     // Too short to be a deliberate stick — cancel this drag.
     stick.visible = false;
     stickA = null;
-    phaseText.textContent = 'Stick too short. Hold trigger, drag at least 30cm along the floor, release.';
+    drawHUD('Too short. Hold the trigger, drag at least 30cm along the floor, then release.', '', '', '');
     return;
   }
   layFlatSegment(stick, stickA, hit, 0.008);
@@ -372,35 +454,30 @@ function scoreAttempt(a, b) {
 
 function showScore(signed) {
   const mag = Math.abs(signed).toFixed(1);
-  scoreText.style.display = 'block';
+  let score, color;
   if (Math.abs(signed) < 0.7) {
-    scoreText.textContent = `${mag}° — dead on`;
-    scoreText.className = 'pure';
+    score = `${mag}°  dead on`;   color = '#7ddf8f';
   } else if (signed > 0) {
-    scoreText.textContent = `${mag}° RIGHT of target`;
-    scoreText.className = 'right';
+    score = `${mag}° RIGHT`;      color = '#ff6b5e';
   } else {
-    scoreText.textContent = `${mag}° LEFT of target`;
-    scoreText.className = 'left';
+    score = `${mag}° LEFT`;       color = '#ffb84d';
   }
 
   const avg = history.reduce((s, v) => s + v, 0) / history.length;
   const bias = avg > 0 ? 'right' : 'left';
-  statsText.style.display = 'block';
-  statsText.textContent =
-    `Attempt ${history.length} · avg bias ${Math.abs(avg).toFixed(1)}° ${bias}` +
-    ` · squeeze grip = go again · hold grip = reset`;
-  phaseText.textContent = 'Green = true line. Orange = your aim.';
+  const stats =
+    `Attempt ${history.length}  ·  avg bias ${Math.abs(avg).toFixed(1)}° ${bias}` +
+    `  ·  grip = again  ·  hold grip = reset`;
+  drawHUD('Green = true line.   Orange = your aim.', score, color, stats);
 }
 
 function updateHUD() {
   if (phase === PHASE.PLACE_BALL) {
-    phaseText.textContent = 'Point at the floor by your feet and pull the trigger to place the ball.';
+    drawHUD('Step 1 of 3.  Aim at the floor by your feet and pull the trigger to drop the ball.', '', '', '');
   } else if (phase === PHASE.PLACE_TARGET) {
-    phaseText.textContent = 'Now point across the room and pull the trigger to place the target ring.';
+    drawHUD('Step 2 of 3.  Aim across the room at your target and pull the trigger.', '', '', '');
   } else if (phase === PHASE.LAY_STICK) {
-    phaseText.textContent =
-      'Take your stance over the ball. Hold trigger and drag on the floor to lay your alignment stick. Release to lock.';
+    drawHUD('Step 3 of 3.  Stand over the ball. Hold the trigger and drag a line the way you think you are aimed. Release to lock.', '', '', '');
   }
 }
 
@@ -408,6 +485,13 @@ function updateHUD() {
 // Render loop
 // ---------------------------------------------------------------
 renderer.setAnimationLoop(() => {
+  // Head-lock the HUD panel to the current headset pose.
+  if (renderer.xr.isPresenting) {
+    const xrCam = renderer.xr.getCamera();
+    hudRig.position.setFromMatrixPosition(xrCam.matrixWorld);
+    hudRig.quaternion.setFromRotationMatrix(xrCam.matrixWorld);
+  }
+
   const placing = phase === PHASE.PLACE_BALL || phase === PHASE.PLACE_TARGET || phase === PHASE.LAY_STICK;
   reticle.visible = false;
 
@@ -454,9 +538,7 @@ async function checkSupport() {
 enterBtn.addEventListener('click', async () => {
   try {
     const session = await navigator.xr.requestSession('immersive-ar', {
-      requiredFeatures: ['local-floor'],
-      optionalFeatures: ['dom-overlay'],
-      domOverlay: { root: hud }
+      requiredFeatures: ['local-floor']
     });
     document.body.classList.add('in-xr');
     renderer.domElement.style.display = 'block';
