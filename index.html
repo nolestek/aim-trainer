@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aim Trainer — Quest 3 Passthrough</title>
+<style>
+  :root {
+    --bg: #0d1410;
+    --panel: rgba(13, 24, 17, 0.82);
+    --green: #7ddf8f;
+    --amber: #ffb84d;
+    --red: #ff6b5e;
+    --ink: #e8f2ea;
+    --dim: #8aa593;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    background: var(--bg);
+    color: var(--ink);
+    min-height: 100vh;
+  }
+
+  /* ---------- Landing screen ---------- */
+  #landing {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 48px 24px;
+  }
+  #landing h1 {
+    font-size: 2.2rem;
+    letter-spacing: -0.01em;
+    color: var(--green);
+    margin-bottom: 4px;
+  }
+  #landing .sub {
+    color: var(--dim);
+    font-style: italic;
+    margin-bottom: 28px;
+  }
+  #landing ol {
+    margin: 0 0 28px 20px;
+    line-height: 1.7;
+  }
+  #landing li { margin-bottom: 10px; }
+  #landing code {
+    font-family: monospace;
+    background: rgba(255,255,255,0.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  #enterBtn {
+    display: block;
+    width: 100%;
+    padding: 18px;
+    font-size: 1.25rem;
+    font-family: inherit;
+    color: #0d1410;
+    background: var(--green);
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  #enterBtn:disabled {
+    background: #3a4a3f;
+    color: var(--dim);
+    cursor: not-allowed;
+  }
+  #supportMsg {
+    margin-top: 14px;
+    color: var(--amber);
+    font-size: 0.95rem;
+    text-align: center;
+    min-height: 1.2em;
+  }
+
+  /* ---------- In-headset HUD (WebXR DOM overlay) ---------- */
+  #hud {
+    display: none;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+    padding: 16px;
+  }
+  body.in-xr #landing { display: none; }
+  body.in-xr #hud { display: block; }
+  #hud .card {
+    max-width: 480px;
+    margin: 0 auto;
+    background: var(--panel);
+    border: 1px solid rgba(125, 223, 143, 0.35);
+    border-radius: 14px;
+    padding: 14px 18px;
+    text-align: center;
+  }
+  #phaseText {
+    font-size: 1.15rem;
+    line-height: 1.4;
+  }
+  #scoreText {
+    font-size: 2rem;
+    margin-top: 6px;
+    display: none;
+  }
+  #scoreText.left  { color: var(--amber); }
+  #scoreText.right { color: var(--red); }
+  #scoreText.pure  { color: var(--green); }
+  #statsText {
+    margin-top: 6px;
+    color: var(--dim);
+    font-size: 0.95rem;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="landing">
+  <h1>Aim Trainer</h1>
+  <p class="sub">Passthrough alignment drill for Quest 3</p>
+  <ol>
+    <li><strong>Clear ~4m of floor space.</strong> Passthrough stays on — you'll see your real room.</li>
+    <li><strong>Right controller trigger</strong>: place the <span style="color:var(--ink)">ball</span> at your feet, then place the <span style="color:var(--green)">target ring</span> across the room.</li>
+    <li>Take your normal golf stance over the ball. <strong>Hold trigger and drag</strong> on the floor to lay your alignment stick where you <em>think</em> the target line runs. Release to lock it.</li>
+    <li>The app shows your aim error in degrees and reveals the true line.</li>
+    <li><strong>Squeeze grip</strong>: new attempt (same ball &amp; target). <strong>Hold grip 1.5s</strong>: full reset.</li>
+  </ol>
+  <button id="enterBtn" disabled>Checking headset…</button>
+  <div id="supportMsg"></div>
+</div>
+
+<div id="hud">
+  <div class="card">
+    <div id="phaseText">Point at the floor by your feet and pull the trigger to place the ball.</div>
+    <div id="scoreText"></div>
+    <div id="statsText"></div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------------------------------------------------------------
+// State
+// ---------------------------------------------------------------
+const PHASE = { PLACE_BALL: 0, PLACE_TARGET: 1, LAY_STICK: 2, RESULTS: 3 };
+let phase = PHASE.PLACE_BALL;
+
+let ballPos = null;      // THREE.Vector3 on floor
+let targetPos = null;    // THREE.Vector3 on floor
+let stickA = null;       // drag start point
+let stickLocked = false;
+let activeDragController = null;
+
+const history = [];      // signed errors in degrees; + = right of target, - = left
+let gripHoldStart = 0;
+
+// ---------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------
+const enterBtn = document.getElementById('enterBtn');
+const supportMsg = document.getElementById('supportMsg');
+const hud = document.getElementById('hud');
+const phaseText = document.getElementById('phaseText');
+const scoreText = document.getElementById('scoreText');
+const statsText = document.getElementById('statsText');
+
+// ---------------------------------------------------------------
+// Three.js scene
+// ---------------------------------------------------------------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 40);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+renderer.domElement.style.display = 'none'; // hidden until XR starts
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445544, 2.2));
+
+// ---- Ball (real golf-ball scale) ----
+const ball = new THREE.Mesh(
+  new THREE.SphereGeometry(0.0214, 24, 16),
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35 })
+);
+ball.visible = false;
+scene.add(ball);
+
+// ---- Target ring ----
+const targetRing = new THREE.Mesh(
+  new THREE.TorusGeometry(0.12, 0.012, 12, 48),
+  new THREE.MeshStandardMaterial({ color: 0x35d06a, emissive: 0x0c4d24 })
+);
+targetRing.rotation.x = -Math.PI / 2;
+targetRing.visible = false;
+scene.add(targetRing);
+
+// ---- Reticle (where your ray hits the floor) ----
+const reticle = new THREE.Mesh(
+  new THREE.RingGeometry(0.035, 0.05, 32),
+  new THREE.MeshBasicMaterial({ color: 0x7ddf8f, transparent: true, opacity: 0.85, side: THREE.DoubleSide })
+);
+reticle.rotation.x = -Math.PI / 2;
+reticle.visible = false;
+scene.add(reticle);
+
+// ---- Alignment stick (thin orange box, scaled/rotated between two points) ----
+const stick = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 0.012, 0.02),
+  new THREE.MeshStandardMaterial({ color: 0xff9a3d, emissive: 0x5a2c00 })
+);
+stick.visible = false;
+scene.add(stick);
+
+// ---- True line (green, revealed at results) ----
+const trueLine = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 0.006, 0.014),
+  new THREE.MeshStandardMaterial({ color: 0x35d06a, emissive: 0x0c4d24 })
+);
+trueLine.visible = false;
+scene.add(trueLine);
+
+function layFlatSegment(mesh, a, b, y) {
+  // Position a unit-length box between two floor points.
+  const mid = a.clone().add(b).multiplyScalar(0.5);
+  const len = a.distanceTo(b);
+  mesh.position.set(mid.x, y, mid.z);
+  mesh.scale.set(Math.max(len, 0.001), 1, 1);
+  mesh.rotation.set(0, Math.atan2(-(b.z - a.z), b.x - a.x), 0);
+  mesh.visible = true;
+}
+
+// ---------------------------------------------------------------
+// Controllers
+// ---------------------------------------------------------------
+const raycaster = new THREE.Raycaster();
+const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y = 0 in local-floor space
+const tmpMat = new THREE.Matrix4();
+
+function controllerFloorHit(controller) {
+  tmpMat.identity().extractRotation(controller.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tmpMat);
+  const hit = new THREE.Vector3();
+  return raycaster.ray.intersectPlane(floorPlane, hit) ? hit : null;
+}
+
+function makeControllerRay() {
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -6)
+  ]);
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.35
+  }));
+  line.name = 'ray';
+  return line;
+}
+
+const controllers = [];
+for (let i = 0; i < 2; i++) {
+  const c = renderer.xr.getController(i);
+  c.add(makeControllerRay());
+  c.addEventListener('selectstart', () => onSelectStart(c));
+  c.addEventListener('selectend',   () => onSelectEnd(c));
+  c.addEventListener('squeezestart', () => { gripHoldStart = performance.now(); });
+  c.addEventListener('squeezeend',   () => onSqueeze());
+  scene.add(c);
+  controllers.push(c);
+}
+
+// ---------------------------------------------------------------
+// Interaction logic
+// ---------------------------------------------------------------
+function onSelectStart(controller) {
+  const hit = controllerFloorHit(controller);
+  if (!hit) return;
+
+  if (phase === PHASE.PLACE_BALL) {
+    ballPos = hit.clone();
+    ball.position.set(ballPos.x, 0.0214, ballPos.z);
+    ball.visible = true;
+    phase = PHASE.PLACE_TARGET;
+    updateHUD();
+  } else if (phase === PHASE.PLACE_TARGET) {
+    if (hit.distanceTo(ballPos) < 1.0) {
+      phaseText.textContent = 'Too close — aim at least 1m past the ball, then pull the trigger.';
+      return;
+    }
+    targetPos = hit.clone();
+    targetRing.position.set(targetPos.x, 0.012, targetPos.z);
+    targetRing.visible = true;
+    phase = PHASE.LAY_STICK;
+    updateHUD();
+  } else if (phase === PHASE.LAY_STICK && !stickLocked) {
+    stickA = hit.clone();
+    activeDragController = controller;
+  }
+}
+
+function onSelectEnd(controller) {
+  if (phase !== PHASE.LAY_STICK || controller !== activeDragController || !stickA) return;
+  const hit = controllerFloorHit(controller);
+  activeDragController = null;
+  if (!hit || hit.distanceTo(stickA) < 0.3) {
+    // Too short to be a deliberate stick — cancel this drag.
+    stick.visible = false;
+    stickA = null;
+    phaseText.textContent = 'Stick too short. Hold trigger, drag at least 30cm along the floor, release.';
+    return;
+  }
+  layFlatSegment(stick, stickA, hit, 0.008);
+  stickLocked = true;
+  scoreAttempt(stickA, hit);
+}
+
+function onSqueeze() {
+  const heldMs = performance.now() - gripHoldStart;
+  if (heldMs > 1500) {
+    fullReset();
+    return;
+  }
+  if (phase === PHASE.RESULTS) {
+    // New attempt, same ball & target.
+    stick.visible = false;
+    trueLine.visible = false;
+    stickA = null;
+    stickLocked = false;
+    phase = PHASE.LAY_STICK;
+    scoreText.style.display = 'none';
+    updateHUD();
+  }
+}
+
+function fullReset() {
+  ballPos = targetPos = stickA = null;
+  stickLocked = false;
+  ball.visible = targetRing.visible = stick.visible = trueLine.visible = false;
+  history.length = 0;
+  phase = PHASE.PLACE_BALL;
+  scoreText.style.display = 'none';
+  statsText.style.display = 'none';
+  updateHUD();
+}
+
+function scoreAttempt(a, b) {
+  // Flatten both directions onto the floor plane.
+  const targetDir = new THREE.Vector3(targetPos.x - ballPos.x, 0, targetPos.z - ballPos.z).normalize();
+  let stickDir = new THREE.Vector3(b.x - a.x, 0, b.z - a.z).normalize();
+  // User may have dragged toward themselves — flip so the stick points downrange.
+  if (stickDir.dot(targetDir) < 0) stickDir.negate();
+
+  // Signed angle around +Y. In three.js (y-up, -z forward), cross.y > 0
+  // means the stick is rotated counter-clockwise from the target line
+  // when viewed from above = aimed LEFT of target.
+  const cross = new THREE.Vector3().crossVectors(targetDir, stickDir);
+  const deg = THREE.MathUtils.radToDeg(Math.atan2(cross.y, targetDir.dot(stickDir)));
+  const signed = -deg; // + = right of target, - = left
+
+  history.push(signed);
+  trueLine.visible = true;
+  layFlatSegment(trueLine, ballPos, targetPos, 0.004);
+  phase = PHASE.RESULTS;
+  showScore(signed);
+}
+
+function showScore(signed) {
+  const mag = Math.abs(signed).toFixed(1);
+  scoreText.style.display = 'block';
+  if (Math.abs(signed) < 0.7) {
+    scoreText.textContent = `${mag}° — dead on`;
+    scoreText.className = 'pure';
+  } else if (signed > 0) {
+    scoreText.textContent = `${mag}° RIGHT of target`;
+    scoreText.className = 'right';
+  } else {
+    scoreText.textContent = `${mag}° LEFT of target`;
+    scoreText.className = 'left';
+  }
+
+  const avg = history.reduce((s, v) => s + v, 0) / history.length;
+  const bias = avg > 0 ? 'right' : 'left';
+  statsText.style.display = 'block';
+  statsText.textContent =
+    `Attempt ${history.length} · avg bias ${Math.abs(avg).toFixed(1)}° ${bias}` +
+    ` · squeeze grip = go again · hold grip = reset`;
+  phaseText.textContent = 'Green = true line. Orange = your aim.';
+}
+
+function updateHUD() {
+  if (phase === PHASE.PLACE_BALL) {
+    phaseText.textContent = 'Point at the floor by your feet and pull the trigger to place the ball.';
+  } else if (phase === PHASE.PLACE_TARGET) {
+    phaseText.textContent = 'Now point across the room and pull the trigger to place the target ring.';
+  } else if (phase === PHASE.LAY_STICK) {
+    phaseText.textContent =
+      'Take your stance over the ball. Hold trigger and drag on the floor to lay your alignment stick. Release to lock.';
+  }
+}
+
+// ---------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------
+renderer.setAnimationLoop(() => {
+  const placing = phase === PHASE.PLACE_BALL || phase === PHASE.PLACE_TARGET || phase === PHASE.LAY_STICK;
+  reticle.visible = false;
+
+  if (placing) {
+    // Reticle follows whichever controller is dragging, else the first with a floor hit.
+    const order = activeDragController
+      ? [activeDragController]
+      : controllers;
+    for (const c of order) {
+      const hit = controllerFloorHit(c);
+      if (hit) {
+        reticle.position.set(hit.x, 0.002, hit.z);
+        reticle.visible = true;
+        // Live stick preview while dragging.
+        if (activeDragController === c && stickA && hit.distanceTo(stickA) > 0.05) {
+          layFlatSegment(stick, stickA, hit, 0.008);
+        }
+        break;
+      }
+    }
+  }
+  renderer.render(scene, camera);
+});
+
+// ---------------------------------------------------------------
+// XR session plumbing
+// ---------------------------------------------------------------
+async function checkSupport() {
+  if (!navigator.xr) {
+    enterBtn.textContent = 'WebXR not available';
+    supportMsg.textContent = 'Open this page in the Quest browser (not a desktop browser).';
+    return;
+  }
+  const ok = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+  if (ok) {
+    enterBtn.textContent = 'Enter AR';
+    enterBtn.disabled = false;
+  } else {
+    enterBtn.textContent = 'Passthrough AR not supported';
+    supportMsg.textContent = 'This device does not report immersive-ar support.';
+  }
+}
+
+enterBtn.addEventListener('click', async () => {
+  try {
+    const session = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['dom-overlay'],
+      domOverlay: { root: hud }
+    });
+    document.body.classList.add('in-xr');
+    renderer.domElement.style.display = 'block';
+    session.addEventListener('end', () => {
+      document.body.classList.remove('in-xr');
+      renderer.domElement.style.display = 'none';
+    });
+    await renderer.xr.setSession(session);
+    fullReset();
+  } catch (err) {
+    supportMsg.textContent = 'Could not start AR session: ' + err.message;
+  }
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+checkSupport();
+</script>
+</body>
+</html>
