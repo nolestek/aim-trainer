@@ -124,7 +124,7 @@
     <li><strong>Trigger</strong> drops the <span style="color:var(--ink)">ball</span> at your feet, then sets the <span style="color:var(--green)">target</span> across the room.</li>
     <li>Over the ball, <strong>hold trigger and drag</strong> a line the way you think you're aimed. Release to lock.</li>
     <li>You get your aim error in degrees, plus your average bias across all attempts.</li>
-    <li><strong>Grip</strong> = new attempt · <strong>hold grip 1.5s</strong> = full reset.</li>
+    <li><strong>Grip</strong> = step back one stage (move the target, redo the ball, or go again) · <strong>hold grip 1.5s</strong> = full reset.</li>
   </ol>
   <button id="enterBtn" disabled>Checking headset…</button>
   <div id="supportMsg"></div>
@@ -244,11 +244,15 @@ function drawHUD(title, score, color, stats) {
   c.textAlign = 'center'; c.textBaseline = 'middle';
 
   if (!score) {
-    // Instruction-only: center the wrapped block.
-    const font = '600 50px Georgia, serif';
-    const lines = wrapLines(c, title, 900, font);
-    c.font = font; c.fillStyle = '#e8f2ea';
-    const lh = 68, startY = H / 2 - (lines.length - 1) * lh / 2;
+    // Instruction-only: center the wrapped block, shrinking if it runs long.
+    let size = 50, lh = 68;
+    let lines = wrapLines(c, title, 900, `600 ${size}px Georgia, serif`);
+    if (lines.length > 3) {
+      size = 40; lh = 54;
+      lines = wrapLines(c, title, 900, `600 ${size}px Georgia, serif`);
+    }
+    c.font = `600 ${size}px Georgia, serif`; c.fillStyle = '#e8f2ea';
+    const startY = H / 2 - (lines.length - 1) * lh / 2;
     lines.forEach((ln, i) => c.fillText(ln, W / 2, startY + i * lh));
   } else {
     const tFont = '600 40px Georgia, serif';
@@ -405,19 +409,42 @@ function onSelectEnd(controller) {
 function onSqueeze() {
   const heldMs = performance.now() - gripHoldStart;
   if (heldMs > 1500) {
-    fullReset();
+    fullReset();      // hold grip = start completely over
     return;
   }
+  stepBack();         // short grip = back up one stage
+}
+
+// Short grip walks back through the stages so you can fix a placement
+// without a full reset. Ball and attempt history are kept.
+function stepBack() {
   if (phase === PHASE.RESULTS) {
     // New attempt, same ball & target.
     stick.visible = false;
     trueLine.visible = false;
     stickA = null;
     stickLocked = false;
+    activeDragController = null;
     phase = PHASE.LAY_STICK;
-    scoreText.style.display = 'none';
+    updateHUD();
+  } else if (phase === PHASE.LAY_STICK) {
+    // Move the target: drop the stick and re-place the ring.
+    stick.visible = false;
+    stickA = null;
+    stickLocked = false;
+    activeDragController = null;
+    targetPos = null;
+    targetRing.visible = false;
+    phase = PHASE.PLACE_TARGET;
+    updateHUD();
+  } else if (phase === PHASE.PLACE_TARGET) {
+    // Re-place the ball.
+    ballPos = null;
+    ball.visible = false;
+    phase = PHASE.PLACE_BALL;
     updateHUD();
   }
+  // PLACE_BALL: nothing earlier to step back to.
 }
 
 function fullReset() {
@@ -467,17 +494,17 @@ function showScore(signed) {
   const bias = avg > 0 ? 'right' : 'left';
   const stats =
     `Attempt ${history.length}  ·  avg bias ${Math.abs(avg).toFixed(1)}° ${bias}` +
-    `  ·  grip = again  ·  hold grip = reset`;
+    `  ·  grip = go again  ·  hold grip = full reset`;
   drawHUD('Green = true line.   Orange = your aim.', score, color, stats);
 }
 
 function updateHUD() {
   if (phase === PHASE.PLACE_BALL) {
-    drawHUD('Step 1 of 3.  Aim at the floor by your feet and pull the trigger to drop the ball.', '', '', '');
+    drawHUD('Step 1 of 3.  Aim at the floor by your feet, pull the trigger to drop the ball.', '', '', '');
   } else if (phase === PHASE.PLACE_TARGET) {
-    drawHUD('Step 2 of 3.  Aim across the room at your target and pull the trigger.', '', '', '');
+    drawHUD('Step 2 of 3.  Aim across the room, pull the trigger to set the target.\nGrip = redo the ball.', '', '', '');
   } else if (phase === PHASE.LAY_STICK) {
-    drawHUD('Step 3 of 3.  Stand over the ball. Hold the trigger and drag a line the way you think you are aimed. Release to lock.', '', '', '');
+    drawHUD('Step 3 of 3.  Over the ball, hold the trigger and drag a line the way you think you are aimed. Release to lock.\nGrip = move the target  ·  hold grip = full reset.', '', '', '');
   }
 }
 
